@@ -8,6 +8,7 @@ runs anywhere Python runs. Best listened to on headphones.
 import argparse, wave
 import numpy as np
 from scipy import signal as sps
+from spatial import woodworth_itd
 
 
 def read_wav(path):
@@ -60,8 +61,7 @@ def main():
 
     # ---- Woodworth ITD: itd(theta) = (r/c)(sin(theta) + theta) ----
     R, C = 0.0875, 343.0
-    itd = (R / C) * (sin_t + theta)                        # s, >0 = source left
-    itd = np.clip(itd, -R * np.pi / C, R * np.pi / C)
+    itd = woodworth_itd(theta, R, C)                      # s, >0 = source left
     BASE = 0.0025                                          # 2.5 ms head-start
 
     # ---- 3-band split (butterworth sosfilt) ----
@@ -86,8 +86,8 @@ def main():
     L_pre = B["lo"]*gL["low"] + B["mid"]*gL["mid"] + B["hi"]*gL["high"]
     R_pre = B["lo"]*gR["low"] + B["mid"]*gR["mid"] + B["hi"]*gR["high"]
 
-    dL_tot = (BASE * sr + np.maximum(0,  itd) * sr)        # continuous delay
-    dR_tot = (BASE * sr + np.maximum(0, -itd) * sr)
+    dL_tot = (BASE * sr + np.maximum(0, -itd) * sr)        # continuous delay
+    dR_tot = (BASE * sr + np.maximum(0,  itd) * sr)
     maxd = int(np.ceil(max(dL_tot.max(), dR_tot.max()))) + 2
     L = var_delay(L_pre, dL_tot, maxd)
     R = var_delay(R_pre, dR_tot, maxd)
@@ -112,3 +112,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

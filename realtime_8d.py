@@ -16,6 +16,7 @@ import sys, time, math, argparse, threading
 import numpy as np
 import pyaudiowpatch as pw
 from scipy import signal as sps
+from spatial import woodworth_itd
 from scipy.ndimage import maximum_filter1d
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -169,8 +170,7 @@ def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
     elev = ELEV_A * np.sin(2 * np.pi * ELEV_F * n / SR)
     sin_t = np.sin(theta).astype(np.float32)
     cos_t = (np.cos(theta) * np.cos(elev)).astype(np.float32)
-    itd = (R / C) * (sin_t + theta)              # Woodworth ITD
-    itd = np.clip(itd, -R * np.pi / C, R * np.pi / C)
+    itd = woodworth_itd(theta, R, C)            # positive = source left
     sL, sR = np.maximum(0, sin_t), np.maximum(0, -sin_t)
     b = np.maximum(0, -cos_t)                    # 0 front -> 1 back
     gL = (1-K["low"]*sR)*(1+WARM*b), (1-K["mid"]*sR), (1-K["high"]*sR)*(1-DULL*b)
@@ -178,8 +178,8 @@ def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
     L_pre = lo*gL[0] + mid*gL[1] + hi*gL[2]
     R_pre = lo*gR[0] + mid*gR[1] + hi*gR[2]
 
-    dL = (BASE + np.maximum(0,  itd)) * SR
-    dR = (BASE + np.maximum(0, -itd)) * SR
+    dL = (BASE + np.maximum(0, -itd)) * SR
+    dR = (BASE + np.maximum(0,  itd)) * SR
     L = lagrange_delay(L_pre, dL, hist_L).astype(np.float32)
     Rc = lagrange_delay(R_pre, dR, hist_R).astype(np.float32)
     hist_L = np.concatenate([hist_L, L_pre])[-(MAXD+4):]
@@ -294,3 +294,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
