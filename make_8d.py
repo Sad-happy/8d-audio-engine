@@ -43,6 +43,10 @@ def main():
     args = ap.parse_args()
 
     x, sr = read_wav(args.src)
+    if len(x) == 0:
+        ap.error("input WAV contains no audio frames")
+    if sr <= 13000:
+        ap.error("input sample rate must exceed 13000 Hz for the 6.5 kHz presence EQ")
     mono = x.mean(axis=1).astype(np.float32)
     # presence compensation: restore vocal clarity lost to spatial dulling
     mono = mono + 0.45 * sps.sosfilt(
@@ -96,7 +100,8 @@ def main():
     out = np.stack([L, R], axis=1)
     in_rms = np.sqrt((mono.astype(np.float64) ** 2).mean())
     out_rms = np.sqrt((out.astype(np.float64) ** 2).mean())
-    out *= (in_rms / out_rms)
+    if out_rms > 0:
+        out *= (in_rms / out_rms)
     peak = np.abs(out).max()
     if peak > 0.97:
         out *= 0.97 / peak
