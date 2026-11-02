@@ -99,6 +99,7 @@ After a reboot, repeat steps 1–2 (the routing and the engine do not persist).
 | `beat_sync.py` | BPM tracker + phase-locked rotation used by `--beat-sync` |
 | `test_beatsync.py` | offline unit test of the beat-sync tracker |
 | `spectrum.py` | realtime spectrum window (WASAPI loopback → FFT → tkinter, 56 log-spaced bars) |
+| `fireworks.py` | audio-driven fireworks window (bass → rockets & bursts, strong kick → heart, treble → crackle) |
 
 ### realtime_8d.py CLI
 
@@ -142,6 +143,19 @@ python spectrum.py --device-substr CABLE  # pre-engine signal, for comparison
 
 Close the window to exit; it is passive (loopback only) and safe to run next
 to the engine.
+
+### Fireworks visualizer
+
+`fireworks.py` turns the music into a night sky: bass onsets launch rockets
+that burst into sparks, a really strong kick bursts into a **heart**, treble
+spikes crackle white, and the whole thing sits under twinkling stars and a
+crescent moon. Reacts to the final post-8D sound when the engine is live:
+
+```powershell
+python fireworks.py --top                        # default output loopback
+python fireworks.py --capture-substr CABLE --top # pre-engine signal
+python fireworks.py --demo                       # synthetic pulses, no audio
+```
 
 ### Beat-synced rotation
 

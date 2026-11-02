@@ -94,6 +94,7 @@ powershell -ExecutionPolicy Bypass -File off.ps1
 | `beat_sync.py` | BPM 跟踪器 + 锁相旋转（`--beat-sync` 用） |
 | `test_beatsync.py` | 鼓点同步跟踪器离线单元测试 |
 | `spectrum.py` | 实时频谱窗口（WASAPI 回环 → FFT → tkinter，56 根对数频轴柱子） |
+| `fireworks.py` | 音频驱动烟花窗口（低音→火箭与炸裂、重鼓→心形、高频→碎裂） |
 
 ### realtime_8d.py 参数
 
@@ -134,6 +135,18 @@ python spectrum.py --device-substr CABLE  # 引擎处理前的原始信号，对
 ```
 
 纯旁观（只开回环、不发声），和引擎同时跑毫无冲突；点窗口 × 退出。
+
+### 烟花可视化
+
+`fireworks.py` 把音乐变成夜空：低音起振发射火箭，炸开成漫天火花；特别重的一记
+鼓点会炸出一颗**心形**；镲片高频冒白色碎裂；背景是闪烁星空和一弯月牙。引擎在跑
+时它响应的是 8D 处理后的最终声音：
+
+```powershell
+python fireworks.py --top                        # 默认输出回环
+python fireworks.py --capture-substr CABLE --top # 引擎处理前的原始信号
+python fireworks.py --demo                       # 合成脉冲，无需音频
+```
 
 ### 鼓点同步旋转
 
