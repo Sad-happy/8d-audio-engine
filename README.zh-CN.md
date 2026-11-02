@@ -91,6 +91,7 @@ powershell -ExecutionPolicy Bypass -File off.ps1
 | `capture_loop.py` | 录任意输出设备的回环到 WAV（排障用） |
 | `verify_chain.py` | 向默认输出播测试音、抓另一设备的回环，断言音频在流动 |
 | `test_limiter.py` | 限幅器离线单元测试 |
+| `spectrum.py` | 实时频谱窗口（WASAPI 回环 → FFT → tkinter，56 根对数频轴柱子） |
 
 ### realtime_8d.py 参数
 
@@ -114,6 +115,19 @@ powershell -ExecutionPolicy Bypass -File off.ps1
 ```powershell
 python make_8d.py --in song.wav --out song-8d.wav --frot 0.1
 ```
+
+### 频谱可视化
+
+看看链路最终给了你什么——`spectrum.py` 抓输出设备的 WASAPI 回环（默认系统
+默认输出，即耳机 = 8D 处理后的最终声音），2048 点 FFT 后在小窗里以 30fps 画
+56 根对数频轴柱子（40 Hz–16 kHz）+ 带重力下落的峰值帽：
+
+```powershell
+python spectrum.py --top                  # 最终听到的声音
+python spectrum.py --device-substr CABLE  # 引擎处理前的原始信号，对比用
+```
+
+纯旁观（只开回环、不发声），和引擎同时跑毫无冲突；点窗口 × 退出。
 
 ## 验证链路
 

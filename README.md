@@ -96,6 +96,7 @@ After a reboot, repeat steps 1–2 (the routing and the engine do not persist).
 | `capture_loop.py` | record any output device's loopback to WAV (debug) |
 | `verify_chain.py` | play a tone to the default output, capture another device's loopback, assert audio flows |
 | `test_limiter.py` | offline unit test of the limiter |
+| `spectrum.py` | realtime spectrum window (WASAPI loopback → FFT → tkinter, 56 log-spaced bars) |
 
 ### realtime_8d.py CLI
 
@@ -119,6 +120,22 @@ to see device names).
 ```powershell
 python make_8d.py --in song.wav --out song-8d.wav --frot 0.1
 ```
+
+### Spectrum visualizer
+
+See what the chain actually delivers — `spectrum.py` captures the WASAPI
+loopback of your output device (by default the system default output, i.e.
+your headphones = the final post-8D sound), runs a 2048-point FFT and draws
+56 log-spaced bars (40 Hz–16 kHz) with falling peak caps at 30 fps in a tiny
+tkinter window:
+
+```powershell
+python spectrum.py --top                  # final sound, what you hear
+python spectrum.py --device-substr CABLE  # pre-engine signal, for comparison
+```
+
+Close the window to exit; it is passive (loopback only) and safe to run next
+to the engine.
 
 ## Verify the chain
 
