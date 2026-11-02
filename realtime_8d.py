@@ -12,7 +12,7 @@ Wiring:  players -> default output = VB-Cable "CABLE Input"
 import os
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")   # tiny blocks; BLAS threads blow up memory in detached procs
 os.environ.setdefault("OMP_NUM_THREADS", "1")
-import sys, time, math, argparse, threading
+import sys, time, math, json, argparse, threading
 import numpy as np
 import pyaudiowpatch as pw
 from scipy import signal as sps
@@ -30,6 +30,7 @@ LA = CEIL = ATT_E = REL_E = ATT_M = REL_M = None
 SOS_PRE = SOS_LO = SOS_HI = None
 BS = None                       # optional beat-sync tracker (beat_sync.BeatSync)
 DIP_DEG = None                  # bass-dip depth in degrees (beat-sync mode)
+BYPASS = [False]                # live control channel: True = dry passthrough
 
 
 def configure(a):
@@ -156,6 +157,15 @@ def lagrange_delay(pre, d_samp, hist):
 
 def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
     global zi_pre, zi_lo, zi_hi, hist_L, hist_R, gain_agc, n_global, E_tail, dline
+    if BYPASS[0]:
+        # dry passthrough (live "8D off" switch); keep the beat tracker fed
+        # so re-enabling is seamless, and keep the sample clock running
+        if BS is not None:
+            bass = float(np.sqrt((x.astype(np.float64) ** 2).mean()))
+            BS.feed(bass, n_global / SR)
+            BS.block_theta(BLOCK / SR, SR, BLOCK)
+        n_global += BLOCK
+        return x
     mono = x.mean(axis=1).astype(np.float32)
     if zi_pre is None:
         zi_pre = sps.sosfilt_zi(SOS_PRE) * (mono[0] if mono[0] else 1.0)
@@ -259,8 +269,50 @@ def main():
 
     stop = threading.Event()
 
+    def apply_ctl():
+        """Live control channel: engine.ctl.json next to the script.
+
+        Keys (all optional): bypass bool, frot float (free-run Hz),
+        rev_sec float (auto beats-per-rev target), beats_per_rev int.
+        """
+        ctlp = os.path.join(here, "engine.ctl.json")
+        if not os.path.exists(ctlp):
+            return
+        try:
+            with open(ctlp, encoding="utf-8") as f:
+                cfg = json.loads(f.read() or "{}")
+        except (OSError, ValueError):
+            return
+        if not isinstance(cfg, dict):
+            return
+        if "bypass" in cfg:
+            new = bool(cfg["bypass"])
+            if new != BYPASS[0]:
+                BYPASS[0] = new
+                print("ctl: bypass =", new, flush=True)
+        if "frot" in cfg:
+            f = float(cfg["frot"])
+            if 0.02 <= f <= 0.6:
+                globals()["F_ROT"] = f
+                globals()["ELEV_F"] = 2 * f
+                if BS is not None:
+                    BS.frot = f
+        if "rev_sec" in cfg and BS is not None:
+            r = float(cfg["rev_sec"])
+            if 2.0 <= r <= 20.0:
+                BS.rev_sec = r
+                BS.nrev = 0        # re-pick beats-per-rev at next estimate
+        if "beats_per_rev" in cfg and BS is not None:
+            n = int(cfg["beats_per_rev"])
+            if 2 <= n <= 16:
+                BS.nrev = n
+
     def watchdog():
         while not stop.is_set():
+            try:
+                apply_ctl()
+            except Exception:
+                pass
             if os.path.exists(os.path.join(here, "stop.flag")):
                 stop.set()
                 break
