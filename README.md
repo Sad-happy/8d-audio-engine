@@ -96,6 +96,8 @@ After a reboot, repeat steps 1–2 (the routing and the engine do not persist).
 | `capture_loop.py` | record any output device's loopback to WAV (debug) |
 | `verify_chain.py` | play a tone to the default output, capture another device's loopback, assert audio flows |
 | `test_limiter.py` | offline unit test of the limiter |
+| `beat_sync.py` | BPM tracker + phase-locked rotation used by `--beat-sync` |
+| `test_beatsync.py` | offline unit test of the beat-sync tracker |
 | `spectrum.py` | realtime spectrum window (WASAPI loopback → FFT → tkinter, 56 log-spaced bars) |
 
 ### realtime_8d.py CLI
@@ -109,6 +111,10 @@ After a reboot, repeat steps 1–2 (the routing and the engine do not persist).
 --elev-deg F        vertical wobble amplitude         (default: 25)
 --presence F        2.5-6.5 kHz EQ mix                (default: 0.45)
 --target-rms F      AGC target RMS                    (default: 0.11)
+--beat-sync         lock rotation to the music's BPM  (off by default)
+--beats-per-rev N   beats per revolution              (default: 0 = auto)
+--rev-sec F         target rev length in auto mode    (default: 6.0)
+--bass-dip-deg F    bass-dip depth (beat-sync)        (default: 12)
 ```
 
 Example: fixed output device instead of the system default —
@@ -136,6 +142,28 @@ python spectrum.py --device-substr CABLE  # pre-engine signal, for comparison
 
 Close the window to exit; it is passive (loopback only) and safe to run next
 to the engine.
+
+### Beat-synced rotation
+
+Add `--beat-sync` and the rotation locks itself to the music: a bass-band
+onset tracker estimates the BPM (autocorrelation of the onset envelope,
+refreshed every few seconds) and the azimuth then completes **one revolution
+every N beats** — N is auto-picked so a revolution lasts ~6 s (override with
+`--beats-per-rev`). The phase never jumps: a slow PLL slews theta onto the
+kick grid over a few seconds, so the trajectory stays continuous. On every
+kick the source also dives `--bass-dip-deg` degrees below the horizon
+(default 12°) — you *feel* the drum hit.
+
+```powershell
+python realtime_8d.py --beat-sync                 # auto BPM, ~6 s per rev
+python realtime_8d.py --beat-sync --beats-per-rev 8
+```
+
+Unlocked (no steady beat — podcasts, ambient): it falls back to the normal
+free rotation, and re-locks automatically when a beat reappears. Unit test:
+[test_beatsync.py](test_beatsync.py) (`python test_beatsync.py`) covers
+locking at 120/90 BPM, phase continuity (no snaps), free-run on silence and
+swung (off-grid) kicks.
 
 ## Verify the chain
 

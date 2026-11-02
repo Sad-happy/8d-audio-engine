@@ -91,6 +91,8 @@ powershell -ExecutionPolicy Bypass -File off.ps1
 | `capture_loop.py` | 录任意输出设备的回环到 WAV（排障用） |
 | `verify_chain.py` | 向默认输出播测试音、抓另一设备的回环，断言音频在流动 |
 | `test_limiter.py` | 限幅器离线单元测试 |
+| `beat_sync.py` | BPM 跟踪器 + 锁相旋转（`--beat-sync` 用） |
+| `test_beatsync.py` | 鼓点同步跟踪器离线单元测试 |
 | `spectrum.py` | 实时频谱窗口（WASAPI 回环 → FFT → tkinter，56 根对数频轴柱子） |
 
 ### realtime_8d.py 参数
@@ -104,6 +106,10 @@ powershell -ExecutionPolicy Bypass -File off.ps1
 --elev-deg F        纵向摆动幅度（度）              （默认 25）
 --presence F        2.5-6.5 kHz 临场感 EQ 比例      （默认 0.45）
 --target-rms F      AGC 目标 RMS                    （默认 0.11）
+--beat-sync         旋转锁到音乐 BPM                （默认关）
+--beats-per-rev N   每圈拍数                        （默认 0 = 自动）
+--rev-sec F         自动模式下目标圈长（秒）        （默认 6.0）
+--bass-dip-deg F    低音下潜深度（度，beat-sync）   （默认 12）
 ```
 
 例：不跟随系统默认输出、固定到指定设备——
@@ -128,6 +134,24 @@ python spectrum.py --device-substr CABLE  # 引擎处理前的原始信号，对
 ```
 
 纯旁观（只开回环、不发声），和引擎同时跑毫无冲突；点窗口 × 退出。
+
+### 鼓点同步旋转
+
+加 `--beat-sync`，旋转会自动锁到音乐上：低音频段的起振检测器估计 BPM（起振
+包络自相关，每几秒刷新一次），然后方位角改成**每 N 拍转一圈**——N 自动选，
+让一圈约 6 秒（可用 `--beats-per-rev` 指定）。相位永不跳变：一个慢速 PLL 在
+几秒内把 θ 滑到鼓点网格上，轨迹保持连续。每次踩鼓点，声源还会向地平线以下
+下潜 `--bass-dip-deg` 度（默认 12°）——鼓点是"砸"出来的。
+
+```powershell
+python realtime_8d.py --beat-sync                 # 自动 BPM，约 6 秒/圈
+python realtime_8d.py --beat-sync --beats-per-rev 8
+```
+
+没锁上（播客、氛围乐等无稳定节拍）就回落成普通自由旋转，节拍再现时自动
+重新锁定。单元测试 [test_beatsync.py](test_beatsync.py)
+（`python test_beatsync.py`）覆盖：120/90 BPM 锁定、相位连续（无爆点）、
+静音自由旋转、swing（偏拍）鼓点。
 
 ## 验证链路
 

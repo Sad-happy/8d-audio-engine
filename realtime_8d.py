@@ -28,17 +28,20 @@ R = C = BASE = None
 K = DULL = WARM = PRESENCE = TARGET_RMS = MAXD = None
 LA = CEIL = ATT_E = REL_E = ATT_M = REL_M = None
 SOS_PRE = SOS_LO = SOS_HI = None
+BS = None                       # optional beat-sync tracker (beat_sync.BeatSync)
+DIP_DEG = None                  # bass-dip depth in degrees (beat-sync mode)
 
 
 def configure(a):
     """Resolve all DSP constants from parsed args (globals for the DSP code)."""
     global SR, BLOCK, F_ROT, ELEV_F, ELEV_A, R, C, BASE, K, DULL, WARM
     global PRESENCE, TARGET_RMS, MAXD, LA, CEIL, ATT_E, REL_E, ATT_M, REL_M
-    global SOS_PRE, SOS_LO, SOS_HI
+    global SOS_PRE, SOS_LO, SOS_HI, DIP_DEG
     SR, BLOCK = a.rate, a.block
     F_ROT = a.frot                 # Hz -> a.frot*2 seconds per revolution
     ELEV_F = 2 * F_ROT             # helix: two vertical cycles per revolution
     ELEV_A = math.radians(a.elev_deg)
+    DIP_DEG = a.bass_dip_deg       # beat-sync bass dip depth
     R, C = 0.0875, 343.0           # head radius [m], speed of sound [m/s]
     BASE = 0.0025                  # 2.5 ms base delay (head start)
     K = {"low": 0.08, "mid": 0.30, "high": 0.55}   # per-band far-ear shadow
@@ -166,8 +169,17 @@ def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
     mid = mono - lo - hi
 
     n = n_global + np.arange(BLOCK)
-    theta = 2 * np.pi * F_ROT * n / SR
-    elev = ELEV_A * np.sin(2 * np.pi * ELEV_F * n / SR)
+    if BS is not None:
+        # beat-synced rotation: theta comes from the BPM tracker (locked to
+        # the bass-onset grid), and the bass dip presses the elevation down
+        # on every kick. sin(2*theta) matches the legacy helix ELEV_F=2*F_ROT.
+        bass = float(np.sqrt((lo.astype(np.float64) ** 2).mean()))
+        BS.feed(bass, n_global / SR)
+        theta = BS.block_theta(BLOCK / SR, SR, BLOCK)
+        elev = ELEV_A * np.sin(2 * theta) - math.radians(DIP_DEG) * BS.dip
+    else:
+        theta = 2 * np.pi * F_ROT * n / SR
+        elev = ELEV_A * np.sin(2 * np.pi * ELEV_F * n / SR)
     sin_t = np.sin(theta).astype(np.float32)
     cos_t = (np.cos(theta) * np.cos(elev)).astype(np.float32)
     itd = woodworth_itd(theta, R, C)            # positive = source left
@@ -216,8 +228,23 @@ def main():
                     help="2.5-6.5 kHz presence EQ mix")
     ap.add_argument("--target-rms", type=float, default=0.11,
                     help="AGC target RMS (lower = more transient headroom)")
+    ap.add_argument("--beat-sync", action="store_true",
+                    help="lock the rotation to the music's BPM (bass-onset tracker)")
+    ap.add_argument("--beats-per-rev", type=int, default=0,
+                    help="beats per revolution; 0 = auto (one rev per --rev-sec)")
+    ap.add_argument("--rev-sec", type=float, default=6.0,
+                    help="target revolution length in auto beats-per-rev mode")
+    ap.add_argument("--bass-dip-deg", type=float, default=12.0,
+                    help="bass-dip depth in degrees (beat-sync mode)")
     args = ap.parse_args()
     configure(args)
+
+    global BS
+    if args.beat_sync:
+        from beat_sync import BeatSync
+        BS = BeatSync(dt=args.block / args.rate, frot=args.frot,
+                      beats_per_rev=args.beats_per_rev, rev_sec=args.rev_sec)
+        print("beat-sync enabled (bass-band BPM tracker)")
 
     global hist_L, hist_R, E_tail, dline
     hist_L = np.zeros(MAXD + 4, np.float32)
@@ -270,8 +297,9 @@ def main():
                 underruns[0] += 1
             now = time.time()
             if now - t_last[0] > 30:
+                bpm = f" bpm={BS.bpm:.0f}" if (BS is not None and BS.locked) else ""
                 print(f"stat: {now - t_last[0]:.0f}s underruns={underruns[0]} "
-                      f"gain={gain_agc:.2f}", flush=True)
+                      f"gain={gain_agc:.2f}{bpm}", flush=True)
                 t_last[0] = now
             return (y * 32767).astype(np.int16).tobytes(), pw.paContinue
 
