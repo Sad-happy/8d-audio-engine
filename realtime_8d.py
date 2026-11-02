@@ -188,10 +188,14 @@ def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
 
     out = np.stack([L, Rc], axis=1)
     rms = float(np.sqrt((out.astype(np.float64) ** 2).mean()))
+    g0 = gain_agc
     if rms > 1e-4:
         tgt = float(np.clip(TARGET_RMS / rms, 0.6, 1.6))
         gain_agc += (tgt - gain_agc) * 0.02      # smooth, ~0.4 s settle
-    out *= gain_agc
+    # ramp the AGC gain per sample across the block: a block-constant
+    # multiplier steps at block boundaries while the AGC is moving, which
+    # ticks audibly on hot passages
+    out *= np.linspace(g0, gain_agc, out.shape[0], dtype=np.float32)[:, None]
     return limit(out)
 
 
