@@ -121,7 +121,7 @@ def limit(out):
     #    roll, so M[i] is final exactly for the emitted audio positions)
     roll = np.concatenate([E_tail, E])
     M = maximum_filter1d(roll, size=LA + 1, origin=-(LA // 2))[:B]
-    E_tail = E[-LA:].copy()
+    E_tail = roll[-LA:].copy()
     # 3) smooth follower on the requirement (continuous gain curve, floor 1)
     m = m_lvl
     g = np.empty(B)
@@ -157,18 +157,21 @@ def lagrange_delay(pre, d_samp, hist):
 
 def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
     global zi_pre, zi_lo, zi_hi, hist_L, hist_R, gain_agc, n_global, E_tail, dline
+    frames = len(x)
+    if frames == 0:
+        return x.copy()
     if BYPASS[0]:
         # dry passthrough (live "8D off" switch); keep the beat tracker fed
         # so re-enabling is seamless, and keep the sample clock running
         if BS is not None:
             bass = float(np.sqrt((x.astype(np.float64) ** 2).mean()))
             BS.feed(bass, n_global / SR)
-            BS.block_theta(BLOCK / SR, SR, BLOCK)
-        n_global += BLOCK
+            BS.block_theta(frames / SR, SR, frames)
+        n_global += frames
         return x
     mono = x.mean(axis=1).astype(np.float32)
     if zi_pre is None:
-        zi_pre = sps.sosfilt_zi(SOS_PRE) * (mono[0] if mono[0] else 1.0)
+        zi_pre = sps.sosfilt_zi(SOS_PRE) * mono[0]
         zi_lo = sps.sosfilt_zi(SOS_LO) * mono[0]
         zi_hi = sps.sosfilt_zi(SOS_HI) * mono[0]
     pres, zi_pre = sps.sosfilt(SOS_PRE, mono, zi=zi_pre)
@@ -178,14 +181,14 @@ def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
     lo, hi = lo.astype(np.float32), hi.astype(np.float32)
     mid = mono - lo - hi
 
-    n = n_global + np.arange(BLOCK)
+    n = n_global + np.arange(frames)
     if BS is not None:
         # beat-synced rotation: theta comes from the BPM tracker (locked to
         # the bass-onset grid), and the bass dip presses the elevation down
         # on every kick. sin(2*theta) matches the legacy helix ELEV_F=2*F_ROT.
         bass = float(np.sqrt((lo.astype(np.float64) ** 2).mean()))
         BS.feed(bass, n_global / SR)
-        theta = BS.block_theta(BLOCK / SR, SR, BLOCK)
+        theta = BS.block_theta(frames / SR, SR, frames)
         elev = ELEV_A * np.sin(2 * theta) - math.radians(DIP_DEG) * BS.dip
     else:
         theta = 2 * np.pi * F_ROT * n / SR
@@ -206,7 +209,7 @@ def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
     Rc = lagrange_delay(R_pre, dR, hist_R).astype(np.float32)
     hist_L = np.concatenate([hist_L, L_pre])[-(MAXD+4):]
     hist_R = np.concatenate([hist_R, R_pre])[-(MAXD+4):]
-    n_global += BLOCK
+    n_global += frames
 
     out = np.stack([L, Rc], axis=1)
     rms = float(np.sqrt((out.astype(np.float64) ** 2).mean()))
@@ -338,7 +341,7 @@ def main():
         def cb(in_data, frames, info, flag):
             x = np.frombuffer(in_data, np.int16).reshape(-1, 2).astype(np.float32) / 32768
             if stop.is_set():
-                return np.zeros_like(x).tobytes(), pw.paContinue
+                return np.zeros((frames, 2), np.int16).tobytes(), pw.paComplete
             try:
                 y = process(x)
             except Exception:
@@ -378,4 +381,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
