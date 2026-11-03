@@ -148,8 +148,7 @@ to the engine.
 
 `fireworks.py` turns the music into a night sky. Bass onsets launch rockets,
 treble spikes crackle gold, and the whole thing sits under a star field and a
-moon that tracks the **real lunar phase**. v2 matches the 8d-fireworks plugin
-renderer shell-for-shell:
+crescent moon. v2 matches the 8d-fireworks plugin renderer shell-for-shell:
 
 - **twelve shell types** picked by kick strength — peony (sometimes
   two-colour), chrysanthemum, willow, tilted rings (sometimes doubled), the
@@ -157,9 +156,10 @@ renderer shell-for-shell:
   three-arm spirals, double shells, pistil-and-outer-ring, silver strobes —
   plus a multi-break **grand** shell with a delayed secondary burst;
 - hue-family palettes so each burst stays inside one colour family;
-- a **170-star** sky with a milky-way band, cross flares and meteors;
-- a moon drawn from the current date (synodic month, 2000-01-06 new-moon
-  epoch): exact terminator, earthshine, craters and a warm halo.
+- a star field with a milky-way band, cross flares and meteors;
+- a simple crescent moon (the plugin's real-lunar-phase moon needs alpha
+  compositing tkinter doesn't have — its fake-alpha glow read as opaque
+  discs occluding the stars, so the plain v1 crescent stayed).
 
 Reacts to the final post-8D sound when the engine is live:
 
