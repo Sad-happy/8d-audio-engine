@@ -128,6 +128,7 @@ cv = tk.Canvas(root, width=a.width, height=a.height, bg="#070a14",
 cv.pack()
 W, H = a.width, a.height
 S = min(2.4, max(1.0, H / 340.0))      # physics scale with window height
+BG = "#070a14"                         # sky colour (moon overlay + canvas bg)
 BG_RGB = (7, 10, 20)
 
 rng = random.Random(20261102)
