@@ -10,12 +10,12 @@ Feature parity with the 8d-fireworks plugin renderer (native-dist/fireworks.js):
     a delayed secondary burst;
   - tiered shell selection by kick strength;
   - hue-family palettes so a burst stays inside one colour family;
-  - a real lunar phase: the moon is drawn from the current date (synodic
-    month, 2000-01-06 new-moon epoch) with an exact terminator, earthshine,
-    glow, craters and limb;
-  - a layered star field (170 stars, milky-way band, twinkle, cross flares)
-    and occasional meteors;
-  - comet-tail sparks with a flickering head and a soft bloom.
+  - a simple crescent moon (the plugin's real-lunar-phase moon was reverted
+    here: tkinter has no alpha channel, so the fake-alpha glow rendered as
+    opaque discs occluding the star field, and the item count stuttered);
+  - a star field with a milky-way band, twinkle, cross flares and occasional
+    meteors;
+  - comet-tail sparks with a flickering head.
 
 Bass onsets launch rockets; treble spikes crackle gold. With the 8D engine
 live this reacts to the final post-8D sound (capture the headphone loopback).
@@ -167,9 +167,9 @@ def cc(hue, sat, light, alpha=1.0):
     r, g, b = _mix_rgb((r * 255, g * 255, b * 255), alpha)
     return "#%02x%02x%02x" % (r, g, b)
 
-# ---------- star field: 170 stars, milky-way band, flares ----------
+# ---------- star field: milky-way band, flares (90 stars for tkinter perf) ----------
 STARS = []
-for _ in range(170):
+for _ in range(90):
     in_band = rnd() < 0.42
     if in_band:
         t = rnd()
@@ -189,19 +189,7 @@ for _ in range(170):
         "flare": b > 0.62 and rnd() < 0.62,
     })
 
-# ---------- moon: real synodic phase ----------
-MOON_X, MOON_Y = 0.425, 0.078
-SYNODIC = 29.530588853                       # days
-NEW_MOON_EPOCH = 947182440.0                 # 2000-01-06 18:14 UTC, epoch s
-CRATERS = []
-for _ in range(10):
-    ang, rr = rnd(0, TAU), math.sqrt(rnd()) * 0.68
-    CRATERS.append({"x": math.cos(ang) * rr, "y": math.sin(ang) * rr,
-                    "r": rnd(0.06, 0.19), "a": rnd(0.05, 0.13)})
-
-def lunar_phase(now_s):
-    age = (now_s - NEW_MOON_EPOCH) / 86400.0
-    return ((age % SYNODIC) + SYNODIC) % SYNODIC / SYNODIC   # 0=new, .5=full
+# ---------- moon: simple v1 crescent (real-phase version reverted) ----------
 
 # ---------- show state ----------
 parts = []          # sparks
@@ -209,7 +197,7 @@ rockets = []
 flashes = []        # burst core flares
 delayed = []        # secondary bursts (multi-break shells)
 shooters = []       # meteors
-MAX_PARTS = 560
+MAX_PARTS = 320
 tick_n = 0
 next_shoot = time.time() + 5 + rnd(0, 6)
 V_SPREAD = 0.62     # bloom-tightening velocity scale (plugin-calibrated)
@@ -247,7 +235,8 @@ def burst(x, y, s, hue=None, force_type=None):
     fam = hue_set()
     h1 = hue if hue is not None else pick(fam)
     h2 = pick(fam)
-    dens = (density / 100.0) * 2.0
+    dens = density / 100.0          # (the plugin renderer uses x2.0 headroom;
+                                    #  tkinter shares its budget with 12 shells)
     n = sp = 0
 
     if typ == "heart":
@@ -477,6 +466,7 @@ def tick():
             and now - last_launch > 0.55 and len(rockets) < 8:
         strength = min(1.0, max(0.15, (bass_db - bass_base - 3.0) / 14.0))
         launch(strength)
+        events_seen += 1
         last_launch = now
     elif now - last_launch > 4.5:          # keep the sky alive when quiet
         launch(0.30)
@@ -484,6 +474,7 @@ def tick():
     if treb_db > treb_base + 7.0 and treb_db > -46 \
             and now - last_crackle > 0.45:
         crackle(min(1.0, max(0.3, (treb_db - treb_base - 4.0) / 12.0)))
+        events_seen += 1
         last_crackle = now
 
     # --- physics ---
@@ -550,44 +541,12 @@ def tick():
             cv.create_line(st["x"], st["y"] - fl, st["x"], st["y"] + fl,
                            fill=cl, width=1)
 
-    # moon (real phase, exact terminator)
-    mx, my = W * MOON_X, max(H * MOON_Y, 10)
-    mr = min(34, 18 * S)
-    phase = lunar_phase(now)
-    # warm halo
-    dot(mx, my, mr * 2.6, cc(0.115, 0.55, 0.86, 0.10))
-    dot(mx, my, mr * 1.7, cc(0.115, 0.55, 0.86, 0.16))
-    # unlit disc: cool earthshine
-    dark_c = "#%02x%02x%02x" % _mix_rgb((88, 96, 118), 0.45)
-    cv.create_oval(mx - mr, my - mr, mx + mr, my + mr, fill=dark_c, width=0)
-    # lit region: right semicircle +/- terminator ellipse, mirrored when waning
-    cph = math.cos(TAU * phase)
-    e = max(0.8, abs(cph) * mr)
-    waxing = phase <= 0.5
-    sgn = 1 if waxing else -1
-    pts = []
-    seg = 40
-    for i in range(seg + 1):                     # limb half, top -> bottom
-        ang = -math.pi / 2 + math.pi * i / seg
-        pts += [mx + sgn * mr * math.cos(ang), my + mr * math.sin(ang)]
-    if cph >= 0:                                 # crescent: back along the
-        lo, hi = math.pi / 2, -math.pi / 2       # near side of the ellipse
-    else:                                        # gibbous: around the far side
-        lo, hi = math.pi / 2, math.pi * 1.5
-    for i in range(seg + 1):
-        ang = lo + (hi - lo) * i / seg
-        pts += [mx + sgn * e * math.cos(ang), my + mr * math.sin(ang)]
-    lit_c = cc(0.115, 0.42, 0.87, 0.97)
-    cv.create_polygon(pts, fill=lit_c, smooth=True, width=0)
-    # craters: pit + sunlit rim
-    for cr in CRATERS:
-        cx, cy, crr = mx + cr["x"] * mr, my + cr["y"] * mr, cr["r"] * mr
-        dot(cx, cy, crr, cc(0.09, 0.35, 0.35, min(0.6, cr["a"] * 1.15) + 0.25))
-        dot(cx - crr * 0.18, cy - crr * 0.22, crr * 0.62,
-            cc(0.12, 0.45, 0.78, cr["a"] * 0.55 + 0.3))
-    # limb
-    cv.create_oval(mx - mr, my - mr, mx + mr, my + mr, fill="",
-                   outline=cc(0.13, 0.30, 0.90, 0.42), width=1)
+    # simple crescent moon (v1 style: two ovals — the real-phase rendering
+    # needs alpha compositing tkinter doesn't have, and its fake-alpha glow
+    # discs occluded the stars)
+    mx, my = W * 0.13, H * 0.18
+    dot(mx, my, 16, cc(0.13, 0.18, 0.86, 0.9))
+    cv.create_oval(mx - 7, my - 21, mx + 25, my + 11, fill=BG, width=0)
 
     # meteors
     for sh in shooters:
@@ -631,8 +590,6 @@ def tick():
                            fill=cc(q["hue"], q["sat"] * 0.95,
                                    q["light"] * 0.70, alpha * 0.45),
                            width=max(1, int(size * 0.9)), capstyle="round")
-        dot(q["x"], q["y"], size * 2.2,          # wide faint bloom
-            cc(q["hue"], q["sat"], q["light"], alpha * 0.22))
         dot(q["x"], q["y"], size,                # saturated body
             cc(q["hue"], q["sat"], q["light"], min(1.0, alpha)))
         if q["size"] > 1.05 and not q["spark"]:
