@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""8D Fireworks — an audio-driven fireworks show (tkinter + WASAPI loopback).
+"""8D Fireworks v2 — an audio-driven fireworks show (tkinter + WASAPI loopback).
 
-Bass onsets launch rockets that burst into sparks; a really strong kick
-bursts into a heart. Treble spikes crackle white. Stars and a crescent
-moon fill the sky. With the 8D engine live this reacts to the final
-post-8D sound (capture the headphone loopback).
+Feature parity with the 8d-fireworks plugin renderer (native-dist/fireworks.js):
 
-Rendering model: the canvas is fully redrawn every frame (delete + draw),
-so there is no item churn / z-order burial; spark trails are explicit
-fading ghost dots taken from each spark's position history.
+  - twelve shell types: peony / chrysanthemum / willow / ring (sometimes
+    double) / heart / crossette (sparks split mid-flight) / palm / glitter /
+    spiral / double / pistil / strobe, plus a multi-break "grand" finale with
+    a delayed secondary burst;
+  - tiered shell selection by kick strength;
+  - hue-family palettes so a burst stays inside one colour family;
+  - a real lunar phase: the moon is drawn from the current date (synodic
+    month, 2000-01-06 new-moon epoch) with an exact terminator, earthshine,
+    glow, craters and limb;
+  - a layered star field (170 stars, milky-way band, twinkle, cross flares)
+    and occasional meteors;
+  - comet-tail sparks with a flickering head and a soft bloom.
+
+Bass onsets launch rockets; treble spikes crackle gold. With the 8D engine
+live this reacts to the final post-8D sound (capture the headphone loopback).
+
+Rendering model: the canvas is fully redrawn every frame (delete + draw), so
+there is no item churn / z-order burial. Tkinter has no alpha channel, so all
+"translucent" colours are pre-blended toward the background colour.
 
 Usage:
   python fireworks.py                          # default output loopback
   python fireworks.py --capture-substr CABLE   # pre-engine signal
-  python fireworks.py --demo                   # synthetic bass pulses,
-                                               # no audio needed
+  python fireworks.py --demo                   # synthetic bass pulses
   python fireworks.py --top                    # keep window on top
+  python fireworks.py --density 130            # spark count, 50..150
 
 Deps: numpy, PyAudioWPatch; tkinter ships with Python on Windows.
 """
@@ -29,6 +42,7 @@ import pyaudiowpatch as pw
 
 N = 2048          # FFT window (samples)
 FPS = 30          # animation rate
+TAU = math.pi * 2
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--capture-substr", default="",
@@ -36,9 +50,12 @@ ap.add_argument("--capture-substr", default="",
 ap.add_argument("--width", type=int, default=586)
 ap.add_argument("--height", type=int, default=340)
 ap.add_argument("--top", action="store_true", help="keep window on top")
+ap.add_argument("--density", type=int, default=100,
+                help="spark count percent, 50..150")
 ap.add_argument("--demo", action="store_true",
                 help="ignore audio, fire synthetic pulses (testing)")
 a = ap.parse_args()
+density = min(150, max(50, a.density))
 
 # ---------- audio capture (callback thread only appends bytes) ----------
 frames = deque(maxlen=80)
@@ -110,78 +127,329 @@ cv = tk.Canvas(root, width=a.width, height=a.height, bg="#070a14",
                highlightthickness=0)
 cv.pack()
 W, H = a.width, a.height
-BG = "#070a14"
+S = min(2.4, max(1.0, H / 340.0))      # physics scale with window height
+BG_RGB = (7, 10, 20)
 
 rng = random.Random(20261102)
 
-# star field: (x, y, base brightness 0..1, twinkle speed, phase)
-STARS = [(rng.uniform(6, W - 6), rng.uniform(4, H * 0.62),
-          rng.uniform(0.10, 0.38), rng.uniform(0.6, 1.8), rng.uniform(0, 6.3))
-         for _ in range(46)]
+def rnd(a1=None, b1=None):
+    if a1 is None:
+        return rng.random()
+    return a1 + (b1 - a1) * rng.random()
 
-# hue palette: mostly gold, some rose / cyan / violet
-PALETTE = (0.12, 0.12, 0.12, 0.12, 0.955, 0.955, 0.52, 0.52, 0.76, 0.15)
+def pick(arr):
+    return arr[int(rnd() * len(arr)) % len(arr)]
 
-def hexcol(hue, sat, light):
-    r, g, b = colorsys.hls_to_rgb(hue % 1.0, min(1.0, max(0.0, light)), sat)
-    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+# ---------- palette: hue-family groups (from the plugin renderer) ----------
+PALETTES = (
+    (0.015, 0.045, 0.085),      # ember red / orange
+    (0.095, 0.12, 0.145),       # gold / amber
+    (0.50, 0.53, 0.56),         # ice blue
+    (0.58, 0.62, 0.665),        # blue / indigo
+    (0.74, 0.79, 0.845),        # violet / magenta
+    (0.90, 0.945, 0.975),       # rose / pink
+    (0.30, 0.335, 0.375),       # jade / teal
+    (0.13, 0.955, 0.58),        # warm + rose duet
+)
+def hue_set():
+    return pick(PALETTES)
 
-# particle: dict(x, y, vx, vy, hue, born, life, hist=deque[(x,y), ...])
-parts = []
-rockets = []            # dict(x, y, vx, vy, ty, hue, s, hist)
+def _mix_rgb(fg, alpha):
+    return tuple(int(BG_RGB[i] * (1 - alpha) + fg[i] * alpha) for i in range(3))
+
+def cc(hue, sat, light, alpha=1.0):
+    """Colour as hex, pre-blended toward the background (fake alpha)."""
+    hue = (hue % 1.0 + 1.0) % 1.0
+    sat = min(1.0, max(0.0, sat))
+    light = min(1.0, max(0.0, light))
+    alpha = min(1.0, max(0.0, alpha))
+    r, g, b = colorsys.hls_to_rgb(hue, light, sat)
+    r, g, b = _mix_rgb((r * 255, g * 255, b * 255), alpha)
+    return "#%02x%02x%02x" % (r, g, b)
+
+# ---------- star field: 170 stars, milky-way band, flares ----------
+STARS = []
+for _ in range(170):
+    in_band = rnd() < 0.42
+    if in_band:
+        t = rnd()
+        x = 0.02 + 0.96 * t + rnd(-0.07, 0.07)
+        y = 0.02 + 0.52 * t + rnd(-0.06, 0.06)
+    else:
+        x, y = rnd(0.01, 0.99), rnd(0.01, 0.62)
+    b = (rnd() ** 1.6) * 0.9 + 0.10
+    warm = rnd() < 0.22
+    STARS.append({
+        "x": min(0.995, max(0.005, x)) * W,
+        "y": min(0.66, max(0.005, y)) * H,
+        "b": b, "size": 0.7 + b * 2.3,
+        "sp": rnd(0.4, 2.1), "ph": rnd(0, TAU),
+        "hue": rnd(0.05, 0.14) if warm else rnd(0.56, 0.64),
+        "sat": 0.55 if warm else 0.38,
+        "flare": b > 0.62 and rnd() < 0.62,
+    })
+
+# ---------- moon: real synodic phase ----------
+MOON_X, MOON_Y = 0.425, 0.078
+SYNODIC = 29.530588853                       # days
+NEW_MOON_EPOCH = 947182440.0                 # 2000-01-06 18:14 UTC, epoch s
+CRATERS = []
+for _ in range(10):
+    ang, rr = rnd(0, TAU), math.sqrt(rnd()) * 0.68
+    CRATERS.append({"x": math.cos(ang) * rr, "y": math.sin(ang) * rr,
+                    "r": rnd(0.06, 0.19), "a": rnd(0.05, 0.13)})
+
+def lunar_phase(now_s):
+    age = (now_s - NEW_MOON_EPOCH) / 86400.0
+    return ((age % SYNODIC) + SYNODIC) % SYNODIC / SYNODIC   # 0=new, .5=full
+
+# ---------- show state ----------
+parts = []          # sparks
+rockets = []
+flashes = []        # burst core flares
+delayed = []        # secondary bursts (multi-break shells)
+shooters = []       # meteors
+MAX_PARTS = 560
+tick_n = 0
+next_shoot = time.time() + 5 + rnd(0, 6)
+V_SPREAD = 0.62     # bloom-tightening velocity scale (plugin-calibrated)
+events_seen = 0
+
 bass_base = -60.0
 treb_base = -60.0
 last_launch = 0.0
 last_crackle = 0.0
 
-MAX_PARTS = 240
-TRAIL = 3               # ghost dots per spark
-
-def spawn(x, y, vx, vy, hue, life):
+def add_part(x, y, vx, vy, hue, life, grav=0.05, drag=0.986, size=1.6,
+             trail=3, spark=False, light=0.62, sat=1.0, split=False,
+             split_hue=None):
     if len(parts) >= MAX_PARTS:
         parts.pop(0)
-    parts.append({"x": x, "y": y, "vx": vx, "vy": vy, "hue": hue,
-                  "born": 0, "life": life, "hist": deque(maxlen=TRAIL)})
+    parts.append({"x": x, "y": y, "vx": vx * V_SPREAD, "vy": vy * V_SPREAD,
+                  "hue": hue, "age": 0, "life": life, "grav": grav,
+                  "drag": drag, "size": size, "trail": max(2, trail),
+                  "spark": spark, "light": light, "sat": sat,
+                  "split": split, "split_done": False,
+                  "split_hue": split_hue, "hist": deque(maxlen=max(2, trail))})
 
-def explode(x, y, strength, hue):
-    """Radial burst; a strong kick turns into a heart of sparks."""
-    heart = strength > 0.82
-    n = int(40 + 66 * strength)
-    speed = (2.0 + 2.7 * strength) * (W / 586.0)
-    for _ in range(n):
-        life = 42 + int(26 * strength) + rng.randint(0, 10)
-        if heart:
-            t = rng.uniform(0, 2 * math.pi)
-            hx = 16 * math.sin(t) ** 3
-            hy = 13 * math.cos(t) - 5 * math.cos(2 * t) \
-                 - 2 * math.cos(3 * t) - math.cos(4 * t)
-            s = speed * 0.62
-            spawn(x, y, hx / 16 * s + rng.uniform(-.3, .3),
-                  -hy / 16 * s + rng.uniform(-.3, .3),
-                  0.955 + rng.uniform(-0.02, 0.02), life)
-        else:
-            ang = rng.uniform(0, 2 * math.pi)
-            sp = speed * (1.0 if rng.random() < 0.7 else 0.55)
-            spawn(x, y, math.cos(ang) * sp, math.sin(ang) * sp,
-                  hue + rng.uniform(-0.015, 0.015), life)
-    r = 14 + 22 * strength                       # one-frame flash
-    cv.create_oval(x - r, y - r, x + r, y + r, fill="",
-                   outline=hexcol(hue, 0.35, 0.85), width=2)
+def choose_type(s):
+    if s >= 0.84:
+        return pick(("grand", "heart", "chrysanthemum", "crossette",
+                     "double", "willow", "peony", "pistil"))
+    if s >= 0.55:
+        return pick(("peony", "chrysanthemum", "ring", "crossette", "spiral",
+                     "palm", "glitter", "willow", "pistil", "strobe"))
+    return pick(("peony", "ring", "glitter", "strobe"))
+
+def burst(x, y, s, hue=None, force_type=None):
+    """One shell burst — twelve types, ported from the plugin renderer."""
+    typ = force_type or choose_type(s)
+    fam = hue_set()
+    h1 = hue if hue is not None else pick(fam)
+    h2 = pick(fam)
+    dens = (density / 100.0) * 2.0
+    n = sp = 0
+
+    if typ == "heart":
+        n = int((54 + 40 * s) * dens)
+        sp = (1.7 + 1.7 * s) * S
+        hh = 0.955 if rnd() < 0.6 else 0.02
+        for _ in range(n):
+            ht = rnd(0, TAU)
+            hx = 16 * math.sin(ht) ** 3
+            hy = (13 * math.cos(ht) - 5 * math.cos(2 * ht)
+                  - 2 * math.cos(3 * ht) - math.cos(4 * ht))
+            add_part(x, y, hx / 16 * sp + rnd(-0.25, 0.25),
+                     -hy / 16 * sp + rnd(-0.25, 0.25),
+                     hh + rnd(-0.012, 0.012), int(46 + 22 * s + rnd(0, 10)),
+                     grav=0.045, drag=0.986, trail=4,
+                     size=1.5 + rnd(0, 0.6), light=0.63)
+    elif typ == "chrysanthemum":
+        n = int((44 + 50 * s) * dens)
+        sp = (2.0 + 2.8 * s) * S
+        ch = rnd(0.10, 0.14) if rnd() < 0.55 else h1
+        for _ in range(n):
+            ang = rnd(0, TAU)
+            spd = sp * rnd(0.78, 1.05)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     ch + rnd(-0.012, 0.012), int(78 + 38 * s + rnd(0, 16)),
+                     grav=0.055, drag=0.988, trail=7,
+                     size=1.4 + rnd(0, 0.5), light=0.64)
+    elif typ == "willow":
+        n = int((30 + 26 * s) * dens)
+        sp = (1.5 + 1.5 * s) * S
+        wh = rnd(0.09, 0.14)
+        for _ in range(n):
+            ang = rnd(0, TAU)
+            spd = sp * rnd(0.5, 1.0)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     wh + rnd(-0.008, 0.008), int(110 + 50 * s + rnd(0, 30)),
+                     grav=0.10, drag=0.992, trail=9,
+                     size=1.4 + rnd(0, 0.5), light=0.60)
+    elif typ == "ring":
+        two = rnd() < 0.42
+        n = max(36, int((52 + 18 * s) * dens))
+        sp = (3.9 + 3.0 * s) * S
+        tilt, rot = rnd(0.32, 0.72), rnd(0, TAU)
+        for k in range(n):
+            ang = rot + (k / n) * TAU
+            spd = sp * rnd(0.96, 1.04)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd * tilt,
+                     h1 + rnd(-0.01, 0.01), int(48 + 20 * s + rnd(0, 6)),
+                     grav=0.045, drag=0.987, trail=5, size=1.2,
+                     light=0.62, spark=True)
+            if two and k % 2 == 0:
+                spd = sp * 0.62 * rnd(0.96, 1.04)
+                add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd * tilt,
+                         h2 + rnd(-0.01, 0.01), int(40 + 18 * s),
+                         grav=0.045, drag=0.987, trail=4, size=1.1,
+                         light=0.6, spark=True)
+    elif typ == "crossette":
+        n = int((26 + 12 * s) * dens)
+        sp = (2.1 + 2.2 * s) * S
+        for _ in range(n):
+            ang = rnd(0, TAU)
+            add_part(x, y, math.cos(ang) * sp * rnd(0.9, 1.05),
+                     math.sin(ang) * sp * rnd(0.9, 1.05),
+                     h1 + rnd(-0.012, 0.012), int(54 + 20 * s),
+                     grav=0.05, drag=0.986, trail=4, size=1.5,
+                     split=rnd() < 0.45, split_hue=h2)
+    elif typ == "palm":
+        n = int((12 + 8 * s) * dens) + 6
+        sp = (2.6 + 2.6 * s) * S
+        ph2 = rnd(0.09, 0.13) if rnd() < 0.5 else h1
+        for _ in range(n):
+            ang = rnd(0, TAU)
+            spd = sp * rnd(0.85, 1.05)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     ph2 + rnd(-0.008, 0.008), int(66 + 24 * s),
+                     grav=0.09, drag=0.994, trail=10,
+                     size=2.1 + rnd(0, 0.6), light=0.63)
+    elif typ == "glitter":
+        n = int((70 + 40 * s) * dens)
+        sp = (1.1 + 2.2 * s) * S
+        for _ in range(n):
+            ang = rnd(0, TAU)
+            spd = sp * rnd(0.4, 1.0)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     (rnd(0.10, 0.16) if rnd() < 0.6 else h1) + rnd(-0.01, 0.01),
+                     int(42 + 18 * s + rnd(0, 10)),
+                     grav=0.025, drag=0.972, trail=1,
+                     size=1.0 + rnd(0, 0.5), spark=True, light=0.70)
+    elif typ == "spiral":
+        arms = 3
+        n = int((60 + 30 * s) * dens)
+        for k in range(n):
+            st = k / n
+            ang = st * TAU * 2.2 + (k % arms) * TAU / arms
+            spd = (0.6 + 2.2 * st) * S * (1 + 0.55 * s)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     h1 + rnd(-0.01, 0.01), int(50 + 24 * s),
+                     grav=0.04, drag=0.986, trail=5, size=1.4, light=0.62)
+    elif typ == "double":
+        n2 = int((40 + 30 * s) * dens)
+        sp = (2.2 + 2.6 * s) * S
+        for _ in range(n2):
+            ang = rnd(0, TAU)
+            add_part(x, y, math.cos(ang) * sp * rnd(0.95, 1.05),
+                     math.sin(ang) * sp * rnd(0.95, 1.05),
+                     h1 + rnd(-0.01, 0.01), int(54 + 20 * s),
+                     grav=0.05, drag=0.987, trail=4, size=1.5, light=0.62)
+        for _ in range(int(n2 * 0.6)):
+            ang = rnd(0, TAU)
+            add_part(x, y, math.cos(ang) * sp * 0.55, math.sin(ang) * sp * 0.55,
+                     h2 + rnd(-0.01, 0.01), int(46 + 18 * s),
+                     grav=0.045, drag=0.985, trail=3, size=1.4, light=0.6)
+    elif typ == "grand":
+        n = int((72 + 48 * s) * dens)
+        sp = (2.6 + 3.0 * s) * S
+        hues = (h1, h2, pick(hue_set()))
+        for k in range(n):
+            ang = rnd(0, TAU)
+            spd = sp * rnd(0.8, 1.12)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     hues[k % 3] + rnd(-0.012, 0.012), int(58 + 28 * s),
+                     grav=0.05, drag=0.988, trail=6,
+                     size=1.6 + rnd(0, 0.6), light=0.64)
+        for _ in range(int(44 * dens)):
+            ang = rnd(0, TAU)
+            add_part(x, y, math.cos(ang) * sp * 0.45, math.sin(ang) * sp * 0.45,
+                     rnd(0.10, 0.16), int(64 + rnd(0, 20)),
+                     grav=0.02, drag=0.972, trail=1, size=1.1,
+                     spark=True, light=0.72)
+        delayed.append({"at": tick_n + 16, "x": x + rnd(-26, 26),
+                        "y": y + rnd(-18, 18), "s": s * 0.45, "hue": h2,
+                        "type": "peony"})
+    elif typ == "pistil":
+        n = int((44 + 48 * s) * dens)
+        sp = (2.4 + 2.7 * s) * S
+        for _ in range(n):
+            ang = rnd(0, TAU)
+            spd = sp * rnd(0.86, 1.06)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     h1 + rnd(-0.012, 0.012), int(46 + 26 * s + rnd(0, 12)),
+                     grav=0.05, drag=0.986, trail=4,
+                     size=1.7 + rnd(0, 0.6), light=0.60)
+        np_ = int((22 + 18 * s) * dens)
+        for _ in range(np_):
+            ang = rnd(0, TAU)
+            spd = sp * rnd(0.18, 0.38)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     h2 + rnd(-0.01, 0.01), int(58 + 22 * s + rnd(0, 14)),
+                     grav=0.03, drag=0.99, trail=2,
+                     size=2.0 + rnd(0, 0.6), spark=True, light=0.72)
+    elif typ == "strobe":
+        n = int((46 + 32 * s) * dens)
+        sp = (1.5 + 2.0 * s) * S
+        for _ in range(n):
+            ang = rnd(0, TAU)
+            spd = sp * rnd(0.55, 1.05)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     rnd(0.56, 0.63), int(40 + 16 * s + rnd(0, 10)),
+                     grav=0.02, drag=0.972, trail=2,
+                     size=1.2 + rnd(0, 0.4), spark=True, light=0.94, sat=0.16)
+    else:  # peony
+        n = int((46 + 62 * s) * dens)
+        sp = (2.3 + 3.0 * s) * S
+        bi = rnd() < 0.35
+        for k in range(n):
+            ang = rnd(0, TAU)
+            spd = sp * rnd(0.86, 1.1)
+            add_part(x, y, math.cos(ang) * spd, math.sin(ang) * spd,
+                     (h2 if (bi and (k & 1)) else h1) + rnd(-0.012, 0.012),
+                     int(40 + 30 * s + rnd(0, 12)),
+                     grav=0.048, drag=0.985, trail=3,
+                     size=1.5 + rnd(0, 0.6), light=0.62)
+    flashes.append({"x": x, "y": y, "r": (12 + 24 * s) * S, "hue": h1, "age": 0})
 
 def launch(strength):
-    hue = rng.choice(PALETTE)
-    rockets.append({"x": rng.uniform(W * 0.12, W * 0.88), "y": H + 4,
-                    "vx": rng.uniform(-0.5, 0.5),
-                    "vy": -(3.4 + 3.8 * strength),
-                    "ty": H * (0.16 + 0.30 * (1.0 - strength)),
-                    "hue": hue, "s": strength, "hist": deque(maxlen=TRAIL)})
+    fam = hue_set()
+    rockets.append({"x": rnd(W * 0.18, W * 0.82), "y": H + 4,
+                    "vx": rnd(-0.35, 0.35),
+                    "vy": -(3.4 + 3.6 * strength) * S,
+                    "ty": H * (0.14 + 0.30 * (1.0 - strength)),
+                    "hue": pick(fam), "s": strength, "hist": deque(maxlen=6)})
 
-def draw_dot(x, y, r, col):
+def crackle(strength):
+    cx, cy = rnd(W * 0.12, W * 0.88), rnd(H * 0.06, H * 0.40)
+    n = int((16 + 26 * strength) * density / 100) + 8
+    for _ in range(n):
+        ang, spd = rnd(0, TAU), rnd(0.4, 1.6) * S
+        add_part(cx, cy, math.cos(ang) * spd, math.sin(ang) * spd,
+                 rnd(0.09, 0.16), int(rnd(12, 26)),
+                 grav=0.03, drag=0.97, trail=2, size=1.1,
+                 spark=True, light=0.70)
+    flashes.append({"x": cx, "y": cy, "r": 8 * S, "hue": 0.12, "age": 0})
+
+def dot(x, y, r, col):
     cv.create_oval(x - r, y - r, x + r, y + r, fill=col, width=0)
 
 def tick():
-    global bass_base, treb_base, last_launch, last_crackle
+    global bass_base, treb_base, last_launch, last_crackle, tick_n, next_shoot
+    global events_seen
     now = time.time()
+    now_ms = now * 1000.0
+    tick_n += 1
     bass_db = treb_db = -70.0
     if a.demo:
         ph = now % 1.3
@@ -200,75 +468,190 @@ def tick():
                     treb_db = band_db(mag, TREB)
             except Exception:
                 pass
-    bass_base += (bass_db - bass_base) * 0.020
-    treb_base += (treb_db - treb_base) * 0.020
+    if bass_db > -69:
+        bass_base += (bass_db - bass_base) * 0.020
+        treb_base += (treb_db - treb_base) * 0.020
 
-    # --- launch logic ---
+    # --- onsets ---
     if bass_db > bass_base + 5.5 and bass_db > -50 \
-            and now - last_launch > 0.55 and len(rockets) < 6:
+            and now - last_launch > 0.55 and len(rockets) < 8:
         strength = min(1.0, max(0.15, (bass_db - bass_base - 3.0) / 14.0))
         launch(strength)
         last_launch = now
     elif now - last_launch > 4.5:          # keep the sky alive when quiet
         launch(0.30)
         last_launch = now
-
     if treb_db > treb_base + 7.0 and treb_db > -46 \
             and now - last_crackle > 0.45:
+        crackle(min(1.0, max(0.3, (treb_db - treb_base - 4.0) / 12.0)))
         last_crackle = now
-        cx, cy = rng.uniform(W * 0.15, W * 0.85), rng.uniform(H * 0.08, H * 0.42)
-        for _ in range(rng.randint(8, 14)):
-            ang = rng.uniform(0, 2 * math.pi)
-            sp = rng.uniform(0.5, 1.4)
-            spawn(cx, cy, math.cos(ang) * sp, math.sin(ang) * sp,
-                  0.15, rng.randint(10, 16))
 
     # --- physics ---
+    for db in [d for d in delayed if d["at"] <= tick_n]:
+        delayed.remove(db)
+        burst(db["x"], db["y"], db["s"], db["hue"], db["type"])
+
     for r in list(rockets):
         r["hist"].append((r["x"], r["y"]))
-        r["x"] += r["vx"]; r["y"] += r["vy"]; r["vy"] += 0.020
-        if r["y"] <= r["ty"] or r["vy"] > -0.8:
+        r["x"] += r["vx"]; r["y"] += r["vy"]; r["vy"] += 0.020 * S
+        if r["y"] <= r["ty"] or r["vy"] > -0.8 * S:
             rockets.remove(r)
-            explode(r["x"], r["y"], r["s"], r["hue"])
+            burst(r["x"], r["y"], r["s"], r["hue"])
 
     for q in list(parts):
         q["hist"].append((q["x"], q["y"]))
-        q["vy"] += 0.055
-        q["vx"] *= 0.986; q["vy"] *= 0.986
+        q["vy"] += q["grav"] * S
+        q["vx"] *= q["drag"]; q["vy"] *= q["drag"]
         q["x"] += q["vx"]; q["y"] += q["vy"]
-        q["born"] += 1
-        if q["born"] >= q["life"] or q["y"] > H + 20:
+        q["age"] += 1
+        if q["split"] and not q["split_done"] and q["age"] > q["life"] * 0.55:
+            q["split_done"] = True
+            for _ in range(4):
+                aa, ss = rnd(0, TAU), rnd(0.5, 1.1) * S
+                add_part(q["x"], q["y"], math.cos(aa) * ss, math.sin(aa) * ss,
+                         q["split_hue"] or q["hue"], int(rnd(16, 26)),
+                         grav=0.05, drag=0.97, trail=2, size=1.2,
+                         spark=True, light=0.72)
+        if q["age"] >= q["life"] or q["y"] > H + 30:
             parts.remove(q)
 
-    # --- render: full redraw, bounded item count ---
+    for f in list(flashes):
+        f["age"] += 1
+        if f["age"] > 7:
+            flashes.remove(f)
+
+    for sh in list(shooters):
+        sh["x"] += sh["vx"]; sh["y"] += sh["vy"]; sh["age"] += 1
+        if sh["age"] >= sh["life"]:
+            shooters.remove(sh)
+    if now > next_shoot:
+        shooters.append({"x": rnd(W * 0.30, W * 0.95), "y": rnd(H * 0.02, H * 0.16),
+                         "vx": -rnd(11, 17) * S * 0.5, "vy": rnd(3.5, 6.0) * S * 0.5,
+                         "age": 0, "life": 40, "hue": rnd(0.55, 0.64)})
+        next_shoot = now + 8 + rnd(0, 10)
+
+    # --- render: full redraw every frame ---
     cv.delete("all")
-    tw = now * 2.2
-    for (sx, sy, sb, sp, pp) in STARS:
-        b = sb * (0.72 + 0.28 * math.sin(tw * sp + pp))
-        draw_dot(sx, sy, 0.8, hexcol(0.60, 0.25, 0.16 + b * 0.5))
-    mx, my = W * 0.13, H * 0.18               # crescent moon
-    cv.create_oval(mx - 16, my - 16, mx + 16, my + 16,
-                   fill=hexcol(0.13, 0.18, 0.86), width=0)
-    cv.create_oval(mx - 7, my - 21, mx + 25, my + 11, fill=BG, width=0)
 
-    for r in rockets:                          # rocket + short trail
-        col = hexcol(r["hue"], 0.3, 0.9)
+    # stars (twinkle + cross flares)
+    tw = now * 2.1
+    for st in STARS:
+        b = st["b"] * (0.68 + 0.32 * math.sin(tw * st["sp"] + st["ph"]))
+        base = 0.28 + 0.36 * b
+        alpha = 0.42 + 0.58 * b
+        dot(st["x"], st["y"], st["size"] * 1.1,
+            cc(st["hue"], st["sat"], min(0.82, base + 0.12), alpha))
+        if st["flare"]:
+            fl = st["size"] * (4.5 + 4 * b)
+            cl = cc(st["hue"], st["sat"] * 0.5, min(0.86, base + 0.20),
+                    alpha * 0.5)
+            cv.create_line(st["x"] - fl, st["y"], st["x"] + fl, st["y"],
+                           fill=cl, width=1)
+            cv.create_line(st["x"], st["y"] - fl, st["x"], st["y"] + fl,
+                           fill=cl, width=1)
+
+    # moon (real phase, exact terminator)
+    mx, my = W * MOON_X, max(H * MOON_Y, 10)
+    mr = min(34, 18 * S)
+    phase = lunar_phase(now)
+    # warm halo
+    dot(mx, my, mr * 2.6, cc(0.115, 0.55, 0.86, 0.10))
+    dot(mx, my, mr * 1.7, cc(0.115, 0.55, 0.86, 0.16))
+    # unlit disc: cool earthshine
+    dark_c = "#%02x%02x%02x" % _mix_rgb((88, 96, 118), 0.45)
+    cv.create_oval(mx - mr, my - mr, mx + mr, my + mr, fill=dark_c, width=0)
+    # lit region: right semicircle +/- terminator ellipse, mirrored when waning
+    cph = math.cos(TAU * phase)
+    e = max(0.8, abs(cph) * mr)
+    waxing = phase <= 0.5
+    sgn = 1 if waxing else -1
+    pts = []
+    seg = 40
+    for i in range(seg + 1):                     # limb half, top -> bottom
+        ang = -math.pi / 2 + math.pi * i / seg
+        pts += [mx + sgn * mr * math.cos(ang), my + mr * math.sin(ang)]
+    if cph >= 0:                                 # crescent: back along the
+        lo, hi = math.pi / 2, -math.pi / 2       # near side of the ellipse
+    else:                                        # gibbous: around the far side
+        lo, hi = math.pi / 2, math.pi * 1.5
+    for i in range(seg + 1):
+        ang = lo + (hi - lo) * i / seg
+        pts += [mx + sgn * e * math.cos(ang), my + mr * math.sin(ang)]
+    lit_c = cc(0.115, 0.42, 0.87, 0.97)
+    cv.create_polygon(pts, fill=lit_c, smooth=True, width=0)
+    # craters: pit + sunlit rim
+    for cr in CRATERS:
+        cx, cy, crr = mx + cr["x"] * mr, my + cr["y"] * mr, cr["r"] * mr
+        dot(cx, cy, crr, cc(0.09, 0.35, 0.35, min(0.6, cr["a"] * 1.15) + 0.25))
+        dot(cx - crr * 0.18, cy - crr * 0.22, crr * 0.62,
+            cc(0.12, 0.45, 0.78, cr["a"] * 0.55 + 0.3))
+    # limb
+    cv.create_oval(mx - mr, my - mr, mx + mr, my + mr, fill="",
+                   outline=cc(0.13, 0.30, 0.90, 0.42), width=1)
+
+    # meteors
+    for sh in shooters:
+        t = 1 - sh["age"] / sh["life"]
+        for k in range(1, 6):
+            tx = sh["x"] - sh["vx"] * k * 0.55
+            ty = sh["y"] - sh["vy"] * k * 0.55
+            dot(tx, ty, 1.4 - 0.2 * k,
+                cc(sh["hue"], 0.35, 0.80, 0.75 * t * (1 - k / 6)))
+        dot(sh["x"], sh["y"], 1.7, cc(sh["hue"], 0.25, 0.95, 0.9 * t))
+
+    # rockets + trail
+    for r in rockets:
         for i, (hx, hy) in enumerate(r["hist"]):
-            draw_dot(hx, hy, 1.2 - 0.3 * i, hexcol(r["hue"], 0.3,
-                                                   0.5 - 0.12 * i))
-        draw_dot(r["x"], r["y"], 1.8, col)
+            t = (i + 1) / (len(r["hist"]) + 1)
+            dot(hx, hy, 0.7 + 1.4 * t,
+                cc(r["hue"], 0.45, 0.34 + 0.34 * t, 0.16 + 0.38 * t))
+        dot(r["x"], r["y"], 2.6, cc(r["hue"], 0.5, 0.92, 0.9))
+        dot(r["x"], r["y"], 1.1, "#fff8e8")
 
-    for q in parts:                            # sparks: head + ghost trail
-        age = q["born"]
-        fade = 1.0 - age / q["life"]
-        flick = rng.uniform(0.72, 1.0)
-        light = (0.80 * fade + 0.22) * flick
-        sat2 = 0.25 + 0.65 * (1.0 - fade)
-        for i, (hx, hy) in enumerate(q["hist"]):
-            if i:
-                draw_dot(hx, hy, 1.6 - 0.4 * i,
-                         hexcol(q["hue"], sat2, light * (0.55 - 0.18 * i)))
-        draw_dot(q["x"], q["y"], 1.6, hexcol(q["hue"], sat2, light))
+    # sparks: comet tail + flickering head + soft bloom
+    for q in parts:
+        fade = 1 - q["age"] / q["life"]
+        if fade <= 0:
+            continue
+        flick = (0.35 + 0.65 * abs(math.sin(now * 40 + q["x"] * 0.09
+                                                + q["y"] * 0.06))) \
+                if q["spark"] else 1.0
+        alpha = min(1.0, fade * 1.35) * flick
+        size = q["size"] * 1.25 * (0.85 + 0.3 * fade)
+        hist = list(q["hist"])
+        for i in range(1, len(hist)):            # tail: thin -> bright
+            t = i / len(hist)
+            cv.create_line(hist[i - 1][0], hist[i - 1][1], hist[i][0], hist[i][1],
+                           fill=cc(q["hue"], q["sat"] * 0.95,
+                                   q["light"] * 0.70, alpha * 0.22 * t * t),
+                           width=max(1, int(size * (0.4 + 0.8 * t))),
+                           capstyle="round")
+        if len(hist) > 1:
+            cv.create_line(hist[-1][0], hist[-1][1], q["x"], q["y"],
+                           fill=cc(q["hue"], q["sat"] * 0.95,
+                                   q["light"] * 0.70, alpha * 0.45),
+                           width=max(1, int(size * 0.9)), capstyle="round")
+        dot(q["x"], q["y"], size * 2.2,          # wide faint bloom
+            cc(q["hue"], q["sat"], q["light"], alpha * 0.22))
+        dot(q["x"], q["y"], size,                # saturated body
+            cc(q["hue"], q["sat"], q["light"], min(1.0, alpha)))
+        if q["size"] > 1.05 and not q["spark"]:
+            dot(q["x"], q["y"], max(0.5, size * 0.32),
+                cc(q["hue"], q["sat"] * 0.3, 0.95, alpha * 0.6))
+
+    # burst flares: filled radial bloom (ring read as a soap bubble)
+    for f in flashes:
+        t = 1 - f["age"] / 7
+        if t <= 0:
+            continue
+        rr = f["r"] * (0.85 + f["age"] * 0.10)
+        dot(f["x"], f["y"], rr, cc(f["hue"], 0.85, 0.70, 0.20 * t))
+        dot(f["x"], f["y"], rr * 0.45, cc(f["hue"], 0.9, 0.80, 0.45 * t))
+
+    # status badge
+    cv.create_text(10, H - 12, anchor="w", font=("Consolas", 9),
+                   fill=cc(0.12, 0.7, 0.75, 0.8),
+                   text=f"FX {events_seen}")
 
     root.after(int(1000 / FPS), tick)
 
