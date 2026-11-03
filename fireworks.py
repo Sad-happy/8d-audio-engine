@@ -35,7 +35,7 @@ Deps: numpy, PyAudioWPatch; tkinter ships with Python on Windows.
 """
 import os
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-import sys, math, time, threading, argparse, random, colorsys
+import sys, math, time, json, threading, argparse, random, colorsys
 from collections import deque
 import numpy as np
 import pyaudiowpatch as pw
@@ -54,6 +54,8 @@ ap.add_argument("--density", type=int, default=100,
                 help="spark count percent, 50..150")
 ap.add_argument("--demo", action="store_true",
                 help="ignore audio, fire synthetic pulses (testing)")
+ap.add_argument("--bg-only", action="store_true",
+                help="start with fireworks off: starry sky only")
 a = ap.parse_args()
 density = min(150, max(50, a.density))
 
@@ -203,6 +205,50 @@ tick_n = 0
 next_shoot = time.time() + 5 + rnd(0, 6)
 V_SPREAD = 0.62     # bloom-tightening velocity scale (plugin-calibrated)
 events_seen = 0
+
+# ---------- fireworks on/off (starry-sky-only mode) ----------
+# Three switches drive the same state: click/space on the window, the
+# --bg-only start flag, and ~/.dsh/fireworks/ctl.json {"fw": bool} which
+# the voice butler writes. A changed ctl mtime wins over local state.
+SHOW = {"fw": not a.bg_only}
+FW_CTL = os.path.join(os.environ.get("USERPROFILE") or os.path.expanduser("~"),
+                      ".dsh", "fireworks", "ctl.json")
+ctl_mtime = 0.0
+TOAST = {"text": "", "until": 0.0}
+
+def set_fw(on, announce=True):
+    SHOW["fw"] = on
+    if announce:
+        TOAST["text"] = "烟花已开启" if on else "只留星空 · 点击窗口恢复烟花"
+        TOAST["until"] = time.time() + 2.2
+
+def apply_ctl():
+    global ctl_mtime
+    try:
+        m = os.path.getmtime(FW_CTL)
+    except OSError:
+        return
+    if m <= ctl_mtime:
+        return
+    ctl_mtime = m
+    try:
+        with open(FW_CTL, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return
+    if isinstance(cfg.get("fw"), bool) and cfg["fw"] != SHOW["fw"]:
+        set_fw(cfg["fw"])
+
+def toggle_fw():
+    set_fw(not SHOW["fw"])
+    try:
+        os.makedirs(os.path.dirname(FW_CTL), exist_ok=True)
+        with open(FW_CTL, "w", encoding="utf-8") as f:
+            f.write('{"fw": %s}' % ("true" if SHOW["fw"] else "false"))
+        global ctl_mtime
+        ctl_mtime = os.path.getmtime(FW_CTL)
+    except OSError:
+        pass
 
 bass_base = -60.0
 treb_base = -60.0
@@ -462,21 +508,25 @@ def tick():
         bass_base += (bass_db - bass_base) * 0.020
         treb_base += (treb_db - treb_base) * 0.020
 
-    # --- onsets ---
-    if bass_db > bass_base + 5.5 and bass_db > -50 \
-            and now - last_launch > 0.55 and len(rockets) < 8:
-        strength = min(1.0, max(0.15, (bass_db - bass_base - 3.0) / 14.0))
-        launch(strength)
-        events_seen += 1
-        last_launch = now
-    elif now - last_launch > 4.5:          # keep the sky alive when quiet
-        launch(0.30)
-        last_launch = now
-    if treb_db > treb_base + 7.0 and treb_db > -46 \
-            and now - last_crackle > 0.45:
-        crackle(min(1.0, max(0.3, (treb_db - treb_base - 4.0) / 12.0)))
-        events_seen += 1
-        last_crackle = now
+    apply_ctl()
+
+    # --- onsets (suppressed in starry-sky-only mode; physics keeps running
+    # so in-flight shells land gracefully after a toggle) ---
+    if SHOW["fw"]:
+        if bass_db > bass_base + 5.5 and bass_db > -50 \
+                and now - last_launch > 0.55 and len(rockets) < 8:
+            strength = min(1.0, max(0.15, (bass_db - bass_base - 3.0) / 14.0))
+            launch(strength)
+            events_seen += 1
+            last_launch = now
+        elif now - last_launch > 4.5:      # keep the sky alive when quiet
+            launch(0.30)
+            last_launch = now
+        if treb_db > treb_base + 7.0 and treb_db > -46 \
+                and now - last_crackle > 0.45:
+            crackle(min(1.0, max(0.3, (treb_db - treb_base - 4.0) / 12.0)))
+            events_seen += 1
+            last_crackle = now
 
     # --- physics ---
     for db in [d for d in delayed if d["at"] <= tick_n]:
@@ -606,10 +656,14 @@ def tick():
         dot(f["x"], f["y"], rr, cc(f["hue"], 0.85, 0.70, 0.20 * t))
         dot(f["x"], f["y"], rr * 0.45, cc(f["hue"], 0.9, 0.80, 0.45 * t))
 
-    # status badge
+    # status badge + mode toast
     cv.create_text(10, H - 12, anchor="w", font=("Consolas", 9),
                    fill=cc(0.12, 0.7, 0.75, 0.8),
-                   text=f"FX {events_seen}")
+                   text=f"FX {events_seen}" + ("" if SHOW["fw"] else " - bg"))
+    if TOAST["text"] and now < TOAST["until"]:
+        cv.create_text(W / 2, H - 32, anchor="center",
+                       font=("Microsoft YaHei UI", 10, "bold"),
+                       fill=cc(0.115, 0.55, 0.88, 0.95), text=TOAST["text"])
 
     root.after(int(1000 / FPS), tick)
 
@@ -617,6 +671,8 @@ def on_close():
     root.destroy()
 
 root.protocol("WM_DELETE_WINDOW", on_close)
+cv.bind("<Button-1>", lambda e: toggle_fw())
+root.bind("<space>", lambda e: toggle_fw())
 root.after(int(1000 / FPS), tick)
 try:
     root.mainloop()

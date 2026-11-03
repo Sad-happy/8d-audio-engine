@@ -168,7 +168,14 @@ python fireworks.py --top                        # default output loopback
 python fireworks.py --capture-substr CABLE --top # pre-engine signal
 python fireworks.py --demo                       # synthetic pulses, no audio
 python fireworks.py --density 130 --top          # more sparks per burst
+python fireworks.py --bg-only --top              # starry sky only, fireworks off
 ```
+
+**Background-only mode**: click the window (or press `Space`) to toggle the
+fireworks while keeping the starry sky — music keeps playing, meteors and
+stars stay, in-flight shells land gracefully. The same switch is exposed as
+`~/.dsh/fireworks/ctl.json` `{"fw": bool}` (what the voice-butler's
+"停烟花 / 放烟花" commands write) and as the `--bg-only` start flag.
 
 ### Beat-synced rotation
 

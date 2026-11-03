@@ -156,7 +156,13 @@ python fireworks.py --top                        # 默认输出回环
 python fireworks.py --capture-substr CABLE --top # 引擎处理前的原始信号
 python fireworks.py --demo                       # 合成脉冲，无需音频
 python fireworks.py --density 130 --top          # 每发火花更多
+python fireworks.py --bg-only --top              # 只留星空，不放烟花
 ```
+
+**纯星空模式**：点一下窗口（或按空格）即可开关烟花——星空常驻、音乐照放，
+空中正在飞的烟花会自然落完。同一个开关也暴露在
+`~/.dsh/fireworks/ctl.json` 的 `{"fw": bool}`（语音管家"停烟花 / 放烟花"
+命令写的就是它）和 `--bg-only` 启动参数上。
 
 ### 鼓点同步旋转
 
