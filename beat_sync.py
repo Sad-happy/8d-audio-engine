@@ -126,7 +126,7 @@ class BeatSync:
         pb = abs(k - kf)                # beat-grid error, in beats
         if pb < 0.2:                    # this kick is ON the beat grid
             self._since_grid = 0.0
-            if kf % self.nrev == 0:     # ...and on the revolution grid:
+            if self.nrev and kf % self.nrev == 0:     # ...and on the revolution grid:
                 self.anchor = t_on      # refresh exactly, phase preserved
         else:                           # off-grid kick (syncopation / drift)
             self._since_grid += self.dt
