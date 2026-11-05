@@ -190,6 +190,11 @@ def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
         BS.feed(bass, n_global / SR)
         theta = BS.block_theta(frames / SR, SR, frames)
         elev = ELEV_A * np.sin(2 * theta) - math.radians(DIP_DEG) * BS.dip
+        if not np.isfinite(theta).all() or not np.isfinite(elev).all():
+            # a poisoned tracker must never kill the stream: fall back to
+            # the free-run helix for this block
+            theta = 2 * np.pi * F_ROT * n / SR
+            elev = ELEV_A * np.sin(2 * np.pi * ELEV_F * n / SR)
     else:
         theta = 2 * np.pi * F_ROT * n / SR
         elev = ELEV_A * np.sin(2 * np.pi * ELEV_F * n / SR)
@@ -205,6 +210,9 @@ def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
 
     dL = (BASE + np.maximum(0, -itd)) * SR
     dR = (BASE + np.maximum(0,  itd)) * SR
+    if not (np.isfinite(dL).all() and np.isfinite(dR).all()):
+        dL = np.full(frames, BASE * SR)
+        dR = np.full(frames, BASE * SR)
     L = lagrange_delay(L_pre, dL, hist_L).astype(np.float32)
     Rc = lagrange_delay(R_pre, dR, hist_R).astype(np.float32)
     hist_L = np.concatenate([hist_L, L_pre])[-(MAXD+4):]
@@ -212,9 +220,11 @@ def process(x):   # x: (BLOCK,2) float32 in [-1,1]  ->  (BLOCK,2)
     n_global += frames
 
     out = np.stack([L, Rc], axis=1)
+    if not np.isfinite(out).all():               # last-resort NaN shield
+        out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
     rms = float(np.sqrt((out.astype(np.float64) ** 2).mean()))
     g0 = gain_agc
-    if rms > 1e-4:
+    if rms > 1e-4 and np.isfinite(rms):
         tgt = float(np.clip(TARGET_RMS / rms, 0.6, 1.6))
         gain_agc += (tgt - gain_agc) * 0.02      # smooth, ~0.4 s settle
     # ramp the AGC gain per sample across the block: a block-constant

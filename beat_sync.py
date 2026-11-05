@@ -97,7 +97,10 @@ class BeatSync:
         Unlocked: constant free-run rate (identical to the legacy engine).
         Locked:   base rate + a small PLL pull toward the kick grid.
         """
-        if not self.locked or self.anchor is None or not self.period:
+        if not (math.isfinite(self.theta) and math.isfinite(self._t)):
+            self.theta = 0.0                  # NaN self-heal: never poison DSP
+        if not self.locked or self.anchor is None or not self.period \
+                or not math.isfinite(self.period):
             w = 2.0 * math.pi * self.frot
         else:
             t_rev = self.period * self.nrev
@@ -110,6 +113,16 @@ class BeatSync:
             corr = max(-lim, min(lim, corr))
             w = w0 + corr
         arr = self.theta + np.arange(nsamp) * (w / sr)
+        if not np.isfinite(arr).all() or not math.isfinite(w):
+            # belt & braces: a poisoned state falls back to free-run
+            self.locked = False
+            self.period = None
+            self.anchor = None
+            self.theta = 0.0
+            w = 2.0 * math.pi * self.frot
+            arr = np.arange(nsamp) * (w / sr)
+            self.theta = (w * dur) % (2.0 * math.pi)
+            return arr
         self.theta = (self.theta + w * dur) % (2.0 * math.pi)
         return arr
 
